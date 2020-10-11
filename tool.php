@@ -17,7 +17,7 @@
     //DB接続
     if ($link = mysqli_connect($host, $username, $passwd, $dbname)) {
         //文字コードセット
-        mysqli_set_charset($link, 'UTF8');
+        mysqli_set_charset($link, 'utf8');
         
         //追加ボタン押下時の処理
         if (isset($_POST['add'])) {
@@ -94,7 +94,7 @@
                 }
                 
                 //保存場所の指定
-                move_uploaded_file($_FILES['image']['tmp_name'], $file_name);
+                move_uploaded_file($_FILES['image']['tmp_name'],'./img/'.$file_name);
                 
                 /**
                  * 以下、画像ファイルの処理 
@@ -107,23 +107,113 @@
             
             //エラーメッセージ0(->すべて正しく入力されている)の場合、SQLでdrink_data_tableに追加する
             if (count($err) === 0) {
-                $comment = '商品の追加が完了しました';
-                
+
                 $date = date('Y-m-d H:i:s');
                 
-                $add = $name . '\',' . $price . ',\'' . $date . '\',\'' . $date . '\',' . $status . ',\'' . $file_name;
+                $add_data = $name . '\',' . $price . ',\'' . $date . '\',\'' . $date . '\',' . $status . ',\'' . $file_name;
+
+                /*INSERTが保存されない問題が解決されたら
+                IDを合わせるため両テーブルのレコードをリセットする*/
+                /*ここの2つはトランザクションを入れたほうがよさそうな気がする*/
                 
-                //SQL
+                //SQL@drink_data_table
                 $sql = 'INSERT INTO drink_data_table (drink_name, price, created_at, update_at, status, img)
-                        VALUES (\'' . $add . '\')';
-                var_dump($sql);
-                $result = mysqli_query($link, $sql); 
+                        VALUES (\'' . $add_data . '\')';
+                //var_dump($sql);
+                if ($result = mysqli_query($link, $sql)) { 
+                    
+                    //drink_data_tableで追加したdrink_idを取得
+                    $drink_id = mysqli_insert_id($link);
+                    //var_dump($drink_id);
+                    
+                    $add_con = $drink_id . ',' . $quantity . ',\'' . $date . '\',\'' . $date;
+                    
+                    //SQL@inventory_control_table
+                    $sql = 'INSERT INTO inventory_control_table (drink_id, stock_quantity, created_at, update_at)
+                            VALUES (' . $add_con . '\')';
+                    //var_dump($sql);
+                    if ($result = mysqli_query($link, $sql)) {
+                        $comment = '商品の追加が完了しました';
+                    } else {
+                        $err[] = 'SQL失敗:' . $sql;
+                    }
+                } else {
+                    $err[] = 'SQL失敗:' . $sql;
+                }
+            }
+            //トランザクション成否判定
+            if (count($err) === 0) {
+                //処理確定
+                mysqli_commit($link);
+            } else {
+                mysqli_rollback($link);
+            } 
+        }
+        
+        //在庫数変更時の処理
+        if (isset($_POST['stock'])) {
+            $quantity = preg_replace('/\A[\p{C}\p{Z}]++|[\p{C}\p{Z}]++\z/u', '', $_POST['stock']);
+            $drink_id = $_POST['id'];
+            
+            //在庫数の入力文字判定
+            if (preg_match('/^[1-9][0-9]*/', $quantity) === 0) {
+                $err[] = '在庫数は0以上の整数としてください';
+            } else {
+                //在庫数が変更されずにボタンが押されたかどうかを確認する
+                $sql = 'SELECT stock_quantity
+                        FROM inventory_control_table
+                        WHERE drink_id = \'' . $drink_id . '\'';
                 
+                //SQL実行        
+                if($result = mysqli_query($link, $sql)) {
+                    while ($row = mysqli_fetch_array($result)) {
+                        $stock_data[] = $row;
+                    }
+                    
+                    if ($stock_data[0]['stock_quantity'] === $quantity) {
+                        $err[] = '在庫数が変更されていません';
+                    } else {
+                        //更新日時を取得
+                        $date = date('Y-m-d H:i:s');
+                        
+                        //レコード更新のSQL文
+                        $sql = 'UPDATE inventory_control_table
+                                SET update_at = \'' . $date . '\'
+                                    ,stock_quantity = \'' . $quantity . '\'    
+                                WHERE drink_id = \'' . $drink_id . '\''; 
+            
+                        if ($result = mysqli_query($link, $sql)) {
+                            $comment = '在庫数の変更が完了しました';
+                        }                        
+                    }
+                }            
+            }    
+        }
+        
+        //ステータス変更時の処理
+        if (isset($_POST['status'])) {
+            $status = $_POST['status'];
+            $drink_id = $_POST['id'];
+            
+            //更新日時を取得
+            $date = date('Y-m-d H:i:s');
+
+            //レコード更新のSQL文
+            $sql = 'UPDATE drink_data_table
+                    SET update_at = \'' . $date . '\'
+                        ,status = \'' . $status . '\'    
+                    WHERE drink_id = \'' . $drink_id . '\''; 
+
+            if ($result = mysqli_query($link, $sql)) {
+                $comment = '公開ステータスの変更が完了しました';
             }
         }
-        //drink_data_tableのデータ取得SQL
-        $sql = 'SELECT drink_id, drink_name, price, created_at, update_at, status, img
-                FROM drink_data_table';
+        
+        //テーブル情報取得
+        $sql = 'SELECT ddt.drink_id, ddt.drink_name, ddt.img, ddt.price, ddt.status, ict.stock_quantity
+                FROM drink_data_table AS ddt
+                INNER JOIN inventory_control_table AS ict
+                ON ddt.drink_id = ict.drink_id ';
         
         //SQL実行        
         if($result = mysqli_query($link, $sql)) {
@@ -131,11 +221,9 @@
                 $drink_data[] = $row;
             }
         }
-        
-        var_dump($drink_data);
-        
+
         mysqli_free_result($result);
-        mysqli_close($link);     
+        mysqli_close($link);
     } else {
         print 'DB接続失敗';
     }
@@ -198,22 +286,30 @@
                 <?php } else { ?>
                     <tr>
                 <?php } ?>
-                        <td><img src="<?php print $value['img']; ?>"></td>
+                        <td><img src="/drink/img/<?php print $value['img']; ?>"></td>
                         <td><?php print htmlspecialchars($value['drink_name'], ENT_QUOTES, 'UTF-8'); ?></td>
                         <td><?php print htmlspecialchars($value['price'], ENT_QUOTES, 'UTF-8'); ?>円</td>
-                        <td><form method="post"><input type="text" name="stock"/>個&nbsp;<input type="submit" value="変更"/></form></td>
                         <td>
                             <form method="post">
+                                <input type="text" name="stock" value="<?php print $value['stock_quantity'] ?>"/>個&nbsp;
+                                <input type="hidden" name="id" value="<?php print $value['drink_id']; ?>"/>
+                                <input type="submit" value="変更"/>
+                            </form>
+                        </td>
+                        <td>
+                            <form method="post">
+                                <input type="hidden" name="id" value="<?php print $value['drink_id']; ?>"/>                                
                             <?php if ($value['status'] === '1') { ?>
-                                <button type="submit" name="status" value="0"/>公開→非公開</button>
+                                <input type="hidden" name="status" value="0"/>                                
+                                <input type="submit" value="公開→非公開"/>                            
                             <?php } else { ?>
-                                <button type="submit" name="status" value="1"/>非公開→公開</button>
-                            <?php } ?>    
+                                <input type="hidden" name="status" value="1"/>
+                                <input type="submit" value="非公開→公開"/>
+                            <?php } ?>
                             </form>
                         </td>
                     </tr>
             <?php } ?>
         </table>
-        
     </body>
 </html>
